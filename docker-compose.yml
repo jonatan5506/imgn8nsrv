@@ -1,54 +1,107 @@
 services:
-  redis:
-    image: redis:alpine
-    container_name: redis
+  # ----- NGINX (reverse proxy com SSL) -----
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
     restart: unless-stopped
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      retries: 5
-
-    n8n:
-    image: n8nio/n8n
-    restart: always
     depends_on:
-      - redis
-      - postgres
+      - n8n
     ports:
-      - "5678:5678"
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    networks:
+      - proxy
+
+  # ----- Certbot (Let's Encrypt + DuckDNS) -----
+  certbot:
+    image: certbot/certbot
+    container_name: certbot
+    restart: unless-stopped
+    entrypoint: /bin/sh -c
+    command: >
+      "trap exit TERM; while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet;
+        sleep 12h & wait $${!};
+      done;"
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+    networks:
+      - proxy
+
+  # ----- DuckDNS -----
+  duckdns:
+    image: linuxserver/duckdns
+    container_name: duckdns
+    restart: unless-stopped
     environment:
-      - N8N_HOST=${N8N_HOST}
-      - WEBHOOK_URL=${WEBHOOK_URL}
+      - TZ=America/Sao_Paulo
+      - SUBDOMAINS=natandev
+      - TOKEN=7a709c7e-ca23-4c82-a6cb-f8401cf8fc1f
+      - LOG_FILE=true
+    networks:
+      - proxy
+
+  # ----- N8N -----
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: n8n
+    restart: always
+    environment:
+      - GENERIC_TIMEZONE=America/Sao_Paulo
       - N8N_BASIC_AUTH_ACTIVE=true
       - N8N_BASIC_AUTH_USER=admin
       - N8N_BASIC_AUTH_PASSWORD=admin
-      - GENERIC_TIMEZONE=America/Sao_Paulo
-      - N8N_COOKIE_SECURE=true
-      - QUEUE_MODE=redis
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
+      - N8N_HOST=natandev.duckdns.org
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_SECURE_COOKIE=false
+      - WEBHOOK_URL=https://natandev.duckdns.org/
+      - DB_SQLITE_POOL_SIZE=1
       - N8N_RUNNERS_ENABLED=true
-      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=false
-      - DB_TYPE=postgresdb
-      - DB_POSTGRESDB_HOST=postgres
-      - DB_POSTGRESDB_PORT=5432
-      - DB_POSTGRESDB_DATABASE=n8n
-      - DB_POSTGRESDB_USER=n8n_user
-      - DB_POSTGRESDB_PASSWORD=n8n_pass
+      - N8N_GIT_NODE_DISABLE_BARE_REPOS=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+
+    ports:
+      - "5678:5678"
     volumes:
       - n8n_data:/home/node/.n8n
+    networks:
+      - proxy
 
-  waha:
-    image: devlikeapro/waha:latest
-    container_name: waha
+  # ----- Postgres -----
+  postgres:
+    image: postgres:13
+    restart: always
+    environment:
+      POSTGRES_USER: n8n_user
+      POSTGRES_PASSWORD: n8n_pass
+      POSTGRES_DB: n8n_db
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - lab_evolution
+
+  # ----- Redis -----
+  redis:
+    image: redis:alpine
+    restart: always
     ports:
-      - "3000:3000"
-    restart: unless-stopped
+      - "6380:6379"
+    networks:
+      - lab_evolution
+      - proxy
 
 volumes:
-  redis_data:
-  caddy_data:
-  caddy_config:
   n8n_data:
+  pg_data:
+
+networks:
+  proxy:
+    driver: bridge
+  lab_evolution:
+    driver: bridge
